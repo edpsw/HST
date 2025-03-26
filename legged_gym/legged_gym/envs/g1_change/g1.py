@@ -50,6 +50,8 @@ from legged_gym.utils.human import load_target_jt
 from .g1_config import G1RoughCfg
 import IPython; e = IPython.embed
 
+import math
+
 def sample_int_from_float(x):
     if int(x) == x:
         return int(x)
@@ -69,6 +71,7 @@ class G1():
             device_id (int): 0, 1, ...
             headless (bool): Run without rendering if True
         """
+        self.i = 1
         self.cfg = cfg
         self.sim_params = sim_params
         self.height_samples = None
@@ -83,7 +86,7 @@ class G1():
         self._prepare_reward_function()
         
         # human retargeted poses
-        self._init_target_jt()
+        self._init_goal()
 
         self.init_done = True
     
@@ -120,7 +123,8 @@ class G1():
         # allocate buffers
         self.obs_buf = torch.zeros(self.num_envs, self.num_obs, device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
-        self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
+        # self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
+        self.reset_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         if self.num_privileged_obs is not None:
@@ -131,6 +135,8 @@ class G1():
         
         self.obs_history_buf = torch.zeros(self.num_envs, self.obs_context_len, self.cfg.env.num_observations, device=self.device, dtype=torch.float)
         self.action_history_buf = torch.zeros(self.num_envs, self.action_delay + 2, self.num_actions, device=self.device, dtype=torch.float)
+
+        # self.reach_goal_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
 
         self.extras = {}
 
@@ -159,54 +165,96 @@ class G1():
         return None
 
 
-    def _init_target_jt(self):
-        self.target_jt_seq, self.target_jt_seq_len = load_target_jt(self.device, self.cfg.human.filename, self.default_dof_pos)
-        self.num_target_jt_seq, self.max_target_jt_seq_len, self.dim_target_jt = self.target_jt_seq.shape
+    # def _init_goal(self):
+    #     self.goal_seq, self.goal_seq_len = load_goal(self.device, self.cfg.human.filename, self.default_dof_pos)
+    #     self.num_goal_seq, self.max_goal_seq_len, self.dim_goal = self.goal_seq.shape
+    #     print(f"Loaded target joint trajectories of shape {self.goal_seq.shape}")
+    #     assert(self.dim_goal == self.num_dofs)
+    #     self.goal_i = torch.randint(0, self.num_goal_seq, (self.num_envs,), device=self.device)
+    #     self.goal_j = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+    #     self.goal_dt = 1 / self.cfg.human.freq
+    #     self.goal_update_steps = self.goal_dt / self.dt # not necessary integer
+    #     assert(self.dt <= self.goal_dt)
+    #     self.goal_update_steps_int = sample_int_from_float(self.goal_update_steps)
+    #     self.goal = None
+    #     self.delayed_obs_goal = None
+    #     self.delayed_obs_goal_steps = self.cfg.human.delay / self.goal_dt
+    #     self.delayed_obs_goal_steps_int = sample_int_from_float(self.delayed_obs_goal_steps)
+    #     self.update_goal(torch.tensor([], dtype=torch.long, device=self.device))
+
+
+    def _init_goal(self):
+        self.goal_seq, self.goal_seq_len = load_target_jt(self.device, self.cfg.human.filename, self.default_dof_pos)
+        print('======================')
+        print(self.goal_seq.shape)
+        print(self.goal_seq_len)
+        print(self.default_dof_pos.shape)
         
-        # print("1:",self.target_jt_seq.shape)
-        # print("2:",self.target_jt_seq_len)
-        # print("3:",self.num_target_jt_seq)
-        # 1: torch.Size([1, 3945, 29])
-        # 2: tensor([3945], device='cuda:0')
-        # 3: 1
+        self.num_goal_seq, self.max_goal_seq_len, self.dim_goal = self.goal_seq.shape
+        print(f"Loaded target joint trajectories of shape {self.goal_seq.shape}")
+        assert(self.dim_goal == self.num_dofs)
+        # self.cur_goal_idx = torch.randint(0, self.max_goal_seq_len - self.cfg.human.subseq_length - 1, (self.num_envs,), device=self.device)
+        self.cur_goal_idx = torch.full((self.num_envs,), self.cfg.human.first_goal_frame, device=self.device)
+        # self.goal_j = self.goal_i + self.cfg.human.subseq_length
+        # self.goals = None
+        self.cur_goals = self.goal_seq[:,self.cur_goal_idx,:].squeeze(0)
+        print(self.cur_goals.shape)
+        self.reach_goal_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.reached_goal_total = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+
+        # print(self.goals.shape)
+        self.update_goal(torch.tensor([], dtype=torch.long, device=self.device))
 
 
-        print(f"Loaded target joint trajectories of shape {self.target_jt_seq.shape}")
-        assert(self.dim_target_jt == self.num_dofs)
-        self.target_jt_i = torch.randint(0, self.num_target_jt_seq, (self.num_envs,), device=self.device)
-        self.target_jt_j = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.target_jt_dt = 1 / self.cfg.human.freq
-        self.target_jt_update_steps = self.target_jt_dt / self.dt # not necessary integer
-        assert(self.dt <= self.target_jt_dt)
-        self.target_jt_update_steps_int = sample_int_from_float(self.target_jt_update_steps)
-        self.target_jt = None
-        self.delayed_obs_target_jt = None
-        self.delayed_obs_target_jt_steps = self.cfg.human.delay / self.target_jt_dt
-        self.delayed_obs_target_jt_steps_int = sample_int_from_float(self.delayed_obs_target_jt_steps)
-        self.update_target_jt(torch.tensor([], dtype=torch.long, device=self.device))
+    def update_goal(self, reset_env_ids):
+        
+        # reach_goal_delay = 1 / self.cfg.human.freq 
+        next_flag = self.reach_goal_timer > self.cfg.env.reach_goal_delay / self.dt
+        self.cur_goal_idx[next_flag] += self.cfg.human.subseq_diff
+        self.reach_goal_timer[next_flag] = 0
+        self.reached_goal_total[next_flag] += 1
 
+        # print("self.dof_pos\n",self.dof_pos)
+        # print("self.cur_goals\n",self.cur_goals)
+        # temp = torch.norm(self.dof_pos[:,:] - self.cur_goals[:, :], dim=1)
+        # print(temp)
+        # print(temp.shape)
 
-    def update_target_jt(self, reset_env_ids):
-        self.target_jt = self.target_jt_seq[self.target_jt_i, self.target_jt_j]
-        self.delayed_obs_target_jt = self.target_jt_seq[self.target_jt_i, torch.maximum(self.target_jt_j - self.delayed_obs_target_jt_steps_int, torch.tensor(0))]
+        self.reached_goal_ids = torch.norm(self.dof_pos[:,:] - self.cur_goals[:, :], dim=1) < self.cfg.human.next_goal_threshold
+        self.reach_goal_timer[self.reached_goal_ids] += 1
+
         resample_i = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-        if self.common_step_counter % self.target_jt_update_steps_int == 0:
-            self.target_jt_j += 1
-            jt_eps_end_bool = self.target_jt_j >= self.target_jt_seq_len
-            self.target_jt_j = torch.where(jt_eps_end_bool, torch.zeros_like(self.target_jt_j), self.target_jt_j)
-            resample_i[jt_eps_end_bool.nonzero(as_tuple=False).flatten()] = True
-            self.target_jt_update_steps_int = sample_int_from_float(self.target_jt_update_steps)
-            self.delayed_obs_target_jt_steps_int = sample_int_from_float(self.delayed_obs_target_jt_steps)
+        
         if self.cfg.human.resample_on_env_reset:
-            self.target_jt_j[reset_env_ids] = 0
             resample_i[reset_env_ids] = True
-        self.target_jt_i = torch.where(resample_i, torch.randint(0, self.num_target_jt_seq, (self.num_envs,), device=self.device), self.target_jt_i)
+            # self.cur_goal_idx = torch.where(resample_i, torch.randint(0, self.num_goal_seq, (self.num_envs,), device=self.device), self.cur_goal_idx)
+            self.cur_goal_idx = torch.where(resample_i, torch.full((self.num_envs,), self.cfg.human.first_goal_frame, device=self.device), self.cur_goal_idx)
+        self.cur_goals = self.goal_seq[:,self.cur_goal_idx,:].squeeze(0)
+        self.delayed_obs_goal = self.dof_pos
+        # print(self.cur_goals)
+        # print(self.delayed_obs_goal)
+        # print(reset_env_ids)
 
-        # print("self.common_step_counter" , self.common_step_counter)
-        # print("i", self.target_jt_i)
-        # print("j", self.target_jt_j)
-        # print("self.target_jt_update_steps_int" , self.target_jt_update_steps_int)     #3
-        # print("self.delayed_obs_target_jt_steps_int" , self.delayed_obs_target_jt_steps_int)    #0
+    def _gather_cur_goals(self, future=0):
+        # return self.goals.gather(1, (self.cur_goal_idx[:, None, None]+future).expand(-1, -1, self.goals.shape[-1])).squeeze(1)
+        return self.goal_seq[:,self.cur_goal_idx + future,:].squeeze(0)
+
+
+    # def update_goal(self, reset_env_ids):
+    #     self.goal = self.goal_seq[self.goal_i, self.goal_j]
+    #     self.delayed_obs_goal = self.goal_seq[self.goal_i, torch.maximum(self.goal_j - self.delayed_obs_goal_steps_int, torch.tensor(0))]
+    #     resample_i = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+    #     if self.common_step_counter % self.goal_update_steps_int == 0:
+    #         self.goal_j += 1
+    #         jt_eps_end_bool = self.goal_j >= self.goal_seq_len
+    #         self.goal_j = torch.where(jt_eps_end_bool, torch.zeros_like(self.goal_j), self.goal_j)
+    #         resample_i[jt_eps_end_bool.nonzero(as_tuple=False).flatten()] = True
+    #         self.goal_update_steps_int = sample_int_from_float(self.goal_update_steps)
+    #         self.delayed_obs_goal_steps_int = sample_int_from_float(self.delayed_obs_goal_steps)
+    #     if self.cfg.human.resample_on_env_reset:
+    #         self.goal_j[reset_env_ids] = 0
+    #         resample_i[reset_env_ids] = True
+    #     self.goal_i = torch.where(resample_i, torch.randint(0, self.num_goal_seq, (self.num_envs,), device=self.device), self.goal_i)
 
 
     def step(self, actions):
@@ -257,19 +305,29 @@ class G1():
         self.base_orn_rp[:] = self.get_body_orientation()
         # self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
 
+        
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
         self.compute_reward()
+        
+        # print(self.i )
+        # self.i += 1
+        # print("5:",self.reset_buf)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        # print(env_ids)
         self.reset_idx(env_ids)
-        self.update_target_jt(env_ids)
+        self.update_goal(env_ids)
         self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
 
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+
+
+        self.cur_goals = self._gather_cur_goals()
+        self.next_goals = self._gather_cur_goals(future=1)
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
@@ -277,7 +335,7 @@ class G1():
     def check_termination(self):
         """ Check if environments need to be reset
         """
-        termination_contact_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
+        termination_contact_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > self.cfg.termination.forces_threshold, dim=1)
 
         r, p = self.base_orn_rp[:, 0], self.base_orn_rp[:, 1]
         z = self.root_states[:, 2]
@@ -292,13 +350,28 @@ class G1():
         # if len(self.reset_triggers) > 0:
         #     print('reset_triggers: ', self.reset_triggers)
 
-        self.reset_buf = termination_contact_buf | r_threshold_buff | p_threshold_buff | z_threshold_buff | self.time_out_buf
-        # print(self.reset_buf)
+        # print("termination_contact_buf:",termination_contact_buf)
+        # print("r_threshold_buff",r_threshold_buff)
+        # print("p_threshold_buff",p_threshold_buff)
+        # print("z_threshold_buff",z_threshold_buff)
+        # print("time_out_buf",self.time_out_buf)
+        # print("3:",self.reset_buf)
+
+        # self.reset_buf = termination_contact_buf | r_threshold_buff | p_threshold_buff | z_threshold_buff | self.time_out_buf
+        self.reset_buf = termination_contact_buf | r_threshold_buff | p_threshold_buff | self.time_out_buf
+        # self.reset_buf  = termination_contact_buf |z_threshold_buff 
+        # print("4:",self.reset_buf)
     
 
     def reset(self):
         """ Reset all robots"""
+        print("=========First  Reset all robots===========")
+        # print(torch.randint(0,self.num_envs, (1,), device=self.device))
+        # self.reset_idx(torch.randint(0,self.num_envs, (1,), device=self.device))
+
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        print(torch.arange(self.num_envs, device=self.device))
+        
         obs, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
@@ -332,9 +405,14 @@ class G1():
         self.last_dof_vel[env_ids] = 0.
         self.feet_air_time[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
+        # print("1:",self.reset_buf)
         self.reset_buf[env_ids] = 1
+        # print("2:",self.reset_buf)
         self.obs_history_buf[env_ids, :, :] = 0.
         self.action_history_buf[env_ids, :, :] = 0.
+        self.cur_goal_idx[env_ids] = 0
+        self.reach_goal_timer[env_ids] = 0
+
         # fill extras
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
@@ -390,9 +468,12 @@ class G1():
                                     self.dof_vel * self.obs_scales.dof_vel,  # [8+num_dofs:8+2*num_dofs]
                                     self.actions,  # [8+2*num_dofs:8+3*num_dofs]
                                     ),dim=-1)
-        # print(self.target_jt_j[:3], self.target_jt_i[:3])
-        self.obs_buf = torch.cat([self.obs_buf, self.delayed_obs_target_jt * self.obs_scales.dof_pos], dim=-1)
+        # print(self.goal_j[:3], self.goal_i[:3])
+        print("self.obs_buf.shape\n",self.obs_buf.shape)
+        
+        self.obs_buf = torch.cat([self.obs_buf, self.delayed_obs_goal * self.obs_scales.dof_pos], dim=-1)
 
+        print("self.obs_buf.shape\n",self.obs_buf.shape)
         # add perceptive inputs if not blind
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
@@ -710,6 +791,9 @@ class G1():
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.base_orn_rp = self.get_body_orientation() # [r, p]
         # self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
+
+        
+
         if self.cfg.terrain.measure_heights:
             self.height_points = self._init_height_points()
         self.measured_heights = 0
@@ -940,6 +1024,7 @@ class G1():
         else:
             self.custom_origins = False
             self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
+            self.cur_goal_idx = torch.zeros(self.num_envs, device=self.device, requires_grad=False, dtype=torch.long)
             # create a grid of robots
             num_cols = np.floor(np.sqrt(self.num_envs))
             num_rows = np.ceil(self.num_envs / num_cols)
@@ -948,6 +1033,10 @@ class G1():
             self.env_origins[:, 0] = spacing * xx.flatten()[:self.num_envs]
             self.env_origins[:, 1] = spacing * yy.flatten()[:self.num_envs]
             self.env_origins[:, 2] = 0.
+
+
+            # self.cur_goals = self._gather_cur_goals()
+            # self.next_goals = self._gather_cur_goals(future=1)
 
     def _parse_cfg(self, cfg):
         self.dt = self.cfg.control.decimation * self.sim_params.dt
@@ -1156,17 +1245,31 @@ class G1():
         # penalize high contact forces
         return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
 
-    # def _reward_target_jt(self):
+    # def _reward_goal(self):
     #     # Penalize distance to target joint angles
-    #     target_jt_error = torch.mean(torch.abs(self.dof_pos - self.target_jt), dim=1)
-    #     return torch.exp(-4 * target_jt_error), target_jt_error
+    #     # print("self.dof_pos\n",self.dof_pos)
+    #     # print("self.cur_goals\n",self.cur_goals)
+    #     goal_error = torch.mean(torch.abs(self.dof_pos - self.cur_goals), dim=1)
+    #     return torch.exp(-4 * goal_error), goal_error
 
-    
+
+
     def _reward_target_jt(self):
         # Penalize distance to target joint angles
          # 当前关节位置误差（余弦相似度+绝对误差）
-        target_jt_error  = 0.5 * (1 - torch.cosine_similarity(self.dof_pos , self.target_jt)) \
-              + 0.5 * torch.mean(torch.abs(self.dof_pos - self.target_jt), dim=1)
-        tracking_target_jt_reward = torch.exp(-10 * target_jt_error)
-        return tracking_target_jt_reward, target_jt_error
+        goal_error  = 0.5 * (1 - torch.cosine_similarity(self.dof_pos , self.cur_goals)) \
+              + 0.5 * torch.mean(torch.abs(self.dof_pos - self.cur_goals), dim=1)
+        tracking_goal_reward = torch.exp(-10 * goal_error)
+        return tracking_goal_reward, goal_error 
     
+    # def _reward_balance(self):
+    #     # # 质心投影稳定性（基于足端压力中心CoP）
+    #     cop_x = (left_foot_force*x_left + right_foot_force*x_right) / total_force
+    #     cop_reward = torch.exp(-50 * (cop_x - safe_zone_center)**2 )
+
+
+
+
+    #     # 基座角速度抑制（惩罚高频晃动）
+    #     ang_vel_penalty = torch.sum(self.base_ang_vel[:, :2]**2)  # 仅考虑Roll/Pitch
+    #     balance_reward = 0.7*cop_reward + 0.3*torch.exp(-2*ang_vel_penalty)
