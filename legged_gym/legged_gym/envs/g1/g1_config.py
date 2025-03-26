@@ -45,7 +45,7 @@ class G1RoughCfg( BaseConfig ):
 
         
     class env:
-        num_envs = 100
+        num_envs = 1024
         num_dofs = 29
         num_observations = 95 + num_dofs  # TODO
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
@@ -349,10 +349,10 @@ class G1RoughCfgPPO(BaseConfig):
         policy_class_name = 'ActorCriticTransformer'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 5 # number of policy updates
+        max_iterations = 4000 # number of policy updates
 
         # logging
-        save_interval = 5 # check for potential saves every this many iterations
+        save_interval = 500 # check for potential saves every this many iterations
         experiment_name = 'rough_g1'
         run_name = None
         # load and resume
