@@ -1,64 +1,108 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
-
 from legged_gym.envs.base.base_config import BaseConfig
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
+
+class G1RoughCfgPPO(BaseConfig):
+    seed = 1
+    runner_class_name = 'OnPolicyRunner'
+    class policy:
+        init_noise_std = 1.0
+        # actor_hidden_dims = [512, 256, 128]
+        # critic_hidden_dims = [512, 256, 128]
+        # activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+        # only for 'ActorCriticRecurrent':
+        # rnn_type = 'lstm'
+        # rnn_hidden_size = 512
+        # rnn_num_layers = 1
+
+    class runner:
+        policy_class_name = 'ActorCriticTransformer'
+        algorithm_class_name = 'PPO'
+        num_steps_per_env = 8 # per iteration
+        max_iterations = 5 # number of policy updates
+
+        # logging
+        save_interval = 5 # check for potential saves every this many iterations
+        experiment_name = 'rough_g1'
+        run_name = None
+        # load and resume
+        resume = False
+        load_run = -1 # -1 = last run
+        checkpoint = -1 # -1 = last saved model
+        resume_path = None # updated from load_run and chkpt
+
+
+
+    class algorithm:
+        # training params
+        value_loss_coef = 1.0
+        use_clipped_value_loss = True
+        clip_param = 0.2
+        entropy_coef = 1e-5
+        num_learning_epochs = 2
+        num_mini_batches = 4 # mini batch size = num_envs*nsteps / nminibatches
+        learning_rate = 1.e-4
+        schedule = 'fixed' # could be adaptive, fixed
+        gamma = 0.99
+        lam = 0.95
+        desired_kl = 0.01
+        max_grad_norm = 1.
+
+
 class G1RoughCfg( BaseConfig ):
     class human:
-        delay = 0.08 # delay in seconds
-        freq = 25
+        delay = 0.0 # delay in seconds
+        freq = 30
         
         resample_on_env_reset = False
         filename = 'g1/dance1_subject2.npy'       
           #'ACCAD_walk_10fps.npy'
         subseq_length = 10
-        subseq_diff = 1
+        # subseq_diff = int(30 / freq)
+        subseq_diff = 30 
         next_goal_threshold = 1
         first_goal_frame = 180
 
+
+
         
     class env:
-        num_envs = 1024
+        num_envs = 256
         num_dofs = 29
-        num_observations = 8 + 4 * num_dofs  # TODO
+        num_observations = 8 + 4 * num_dofs +2  # TODO
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
         num_actions = 29
         env_spacing = 3.  # not used with heightfields/trimeshes 
         send_timeouts = True # send time out information to the algorithm
-        episode_length_s = 20 # episode length in seconds
+        episode_length_s = 60 # episode length in seconds
 
         action_delay = 1  # -1 for no delay
         obs_context_len = 8
 
         reach_goal_delay = 0.04
+
+
+    class normalization:
+        class obs_scales:
+            ang_vel = 0.25      # 原0.25 → 匹配±15 rad/s到±1.05
+            orn = 1.0          # 原1.0 → 覆盖±0.8 rad安全范围
+            dof_pos = 2.0       # 原1.0 → 适配±0.5 rad机械限位
+            dof_vel = 0.033     # 原0.05 → 约束±30 rad/s到±1.0
+            height_measurements = 20.0  # 原5.0 → 放大微小地形差异
+
+            cop_metrics = True 
+            cop_x = 2.0       # 新增：CoP位置缩放（将0.2m范围映射到[-1,1]）
+            cop_y = 2.0      
+            feet_force = 0.01 #增：脚底力量缩放（将1000N范围映射到[-1,1]）  
+
+
+
+        commands_scale = [0.5, 0.5, 1.0, 2.0]  # 差异化缩放[vx, vy, ωz, θ_pitch]
+        clip_observations = 10.  # 解注并设置观测截断
+        clip_actions = 10.       # 防止动作指令超限
+
+
+
 
     class terrain:
         mesh_type = "plane" # none, plane, heightfield or trimesh
@@ -98,70 +142,63 @@ class G1RoughCfg( BaseConfig ):
             heading = [-1.0, 1.0]
 
     class init_state:
-        pos = [0.0, 0.0, 0.8] # x,y,z [m]
+        pos = [0.0, 0.0, 0.74] # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
         default_joint_angles = {
-                "left_hip_pitch_joint": -0.253806,
-                "left_hip_roll_joint": 0.31523,
-                "left_hip_yaw_joint": 0.231412,
-                "left_knee_joint": 0.468237,
-                "left_ankle_pitch_joint": -0.238311,
-                "left_ankle_roll_joint": -0.177233,
-                "right_hip_pitch_joint": -0.208658,
-                "right_hip_roll_joint": -0.096185,
-                "right_hip_yaw_joint": -0.420644,
-                "right_knee_joint": 0.452401,
-                "right_ankle_pitch_joint": -0.406019,
-                "right_ankle_roll_joint": -0.010701,
-                "waist_yaw_joint": -0.055024,
-                "waist_roll_joint": 0.00535,
-                "waist_pitch_joint": -0.037965,
-                "left_shoulder_pitch_joint": 0.192194,
-                "left_shoulder_roll_joint": 0.915097,
-                "left_shoulder_yaw_joint": 0.516178,
-                "left_elbow_joint": 0.41974,
-                "left_wrist_roll_joint": 0.455359,
-                "left_wrist_pitch_joint": 0.305581,
-                "left_wrist_yaw_joint": 0.193949,
-                "right_shoulder_pitch_joint": 0.135351,
-                "right_shoulder_roll_joint": -0.747196,
-                "right_shoulder_yaw_joint": -0.684518,
-                "right_elbow_joint": 0.479629,
-                "right_wrist_roll_joint": -0.542164,
-                "right_wrist_pitch_joint": 0.021792,
-                "right_wrist_yaw_joint": -0.125152
+                "left_hip_pitch_joint": -0.20,
+                "left_hip_roll_joint": 0.0,
+                "left_hip_yaw_joint": 0.0,
+                "left_knee_joint": 0.42,
+                "left_ankle_pitch_joint": -0.23,
+                "left_ankle_roll_joint": 0.0,
+                "right_hip_pitch_joint": -0.20,
+                "right_hip_roll_joint": 0.0,
+                "right_hip_yaw_joint": 0.0,
+                "right_knee_joint": 0.42,
+                "right_ankle_pitch_joint": -0.23,
+                "right_ankle_roll_joint": 0.0,
+                "waist_yaw_joint": 0.0,
+                "waist_roll_joint": 0.0,
+                "waist_pitch_joint": 0.0,
+                "left_shoulder_pitch_joint": 0.35,
+                "left_shoulder_roll_joint": 0.16,
+                "left_shoulder_yaw_joint": 0.0,
+                "left_elbow_joint": 0.87,
+                "left_wrist_roll_joint": 0.0,
+                "left_wrist_pitch_joint": 0.0,
+                "left_wrist_yaw_joint": 0.0,
+                "right_shoulder_pitch_joint": 0.35,
+                "right_shoulder_roll_joint": -0.16,
+                "right_shoulder_yaw_joint": 0.0,
+                "right_elbow_joint": 0.87,
+                "right_wrist_roll_joint": 0.0,
+                "right_wrist_pitch_joint": 0.0,
+                "right_wrist_yaw_joint": 0.0
             }
 
-
-
-
-
-
-
-
-# , , , , , , , , , , , , , , , , , , , , , , , , , , , ,   
-
-
+ 
 
 
     class control:
         control_type = 'P'
         # PD Drive parameters:
-        stiffness = {'joint': 100.}  # [N*m/rad]
-        damping = {'joint': 5.}     # [N*m*s/rad]
+        stiffness = {'joint': 100.}  # [N*m/rad]  100.
+        damping = {'joint': 5.}     # [N*m*s/rad]  5.
         # stiffness = {'hip_yaw': 100,
         #              'hip_roll': 100,
         #              'hip_pitch': 100,
         #              'knee': 150,
         #              'ankle': 40,
+        #              'joint': 100,
         #              }  # [N*m/rad]
         # damping = {  'hip_yaw': 2,
         #              'hip_roll': 2,
         #              'hip_pitch': 2,
         #              'knee': 4,
         #              'ankle': 2,
+        #              'joint': 5,
         #              }  
 
         # action scale: target angle = actionScale * action + defaultAngle
@@ -173,14 +210,14 @@ class G1RoughCfg( BaseConfig ):
     class asset:
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1/g1_29dof.urdf'
         name = "g1"
-        foot_name = 'ankle'
+        foot_name = 'ankle_roll'
         penalize_contacts_on = []
         terminate_after_contacts_on = ['pelvis', 'hip', 'shoulder', 'elbow', 'knee']
-        disable_gravity = False
+        disable_gravity = True
         collapse_fixed_joints = True # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
         fix_base_link = False # fixe the base of the robot
-        default_dof_drive_mode = 3 # see GymDofDriveModeFlags (0 is none, 1 is pos tgt, 2 is vel tgt, 3 effort)
-        self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
+        default_dof_drive_mode = 1 # see GymDofDriveModeFlags (0 is none, 1 is pos tgt, 2 is vel tgt, 3 effort)
+        self_collisions = 1 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = True # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = False
 
@@ -201,64 +238,41 @@ class G1RoughCfg( BaseConfig ):
         push_interval_s = 15
         max_push_vel_xy = 2.5
 
+
+
+
     class rewards:
         class scales:
-            # termination = -0.0
-            # tracking_lin_vel = 1.0
-            # tracking_ang_vel = 0.5
-            # lin_vel_z = -0.5
-            # ang_vel_xy = -0.05
-            # orientation = -1.0
-            # torques = -0.0
-            # dof_vel = -0.
-            # dof_acc = -1e-3
-            # base_height = -10.0 
-            # feet_air_time = 0.
-            # collision = -0.
-            # feet_stumble = -0.0 
-            # action_rate = -0.01
-            # stand_still = -0.
-            # dof_pos_limits = -1.0
-            # goal = 5
+            
+            tracking_lin_vel = 5.0
+            tracking_ang_vel = 3.0
+            target_jt = 100
 
-            # tracking_lin_vel = 1.0
-            # tracking_ang_vel = 0.5
-            # lin_vel_z = -2.0
-            # ang_vel_xy = -0.05
-            # orientation = -1.0
-            # base_height = -10.0
-            # dof_acc = -2.5e-7
-            # dof_vel = -1e-3
-            # feet_air_time = 0.0
-            # collision = 0.0
-            # action_rate = -0.01
-            # dof_pos_limits = -5.0
-            # alive = 0.15
-            # hip_pos = -1.0
-            # contact_no_vel = -0.2
-            # feet_swing_height = -20.0
-            # contact = 0.18
-
-
-            termination = -0.0
-            tracking_lin_vel = 0.05
-            tracking_ang_vel = 0.02
-            lin_vel_z = -0
-            ang_vel_xy = -0
-            orientation = -0.
-            torques = -0.0
-            dof_vel = 0.
-            dof_acc = 0.
-            base_height = -0.
-            feet_air_time = 0.
+            action_rate = 0.05
+            alive = 2.0     ##
+            ang_vel_xy = -0.0
+            base_height = 1.1
             collision = -0.
-            stumble = -0.
-            action_rate = -0.
-            stand_still = 0.
-            dof_pos_limits = -0.
-            target_jt = 1
+            contact = 0.18          ##
+            contact_no_vel = -0.2       ##
+            dof_acc = -2.5e-8
+            dof_pos_limits = -5.0
+            dof_vel = -0.   #-1e-3
+            feet_air_time = 0.2
+            feet_swing_height = -0.0    ##
+            hip_pos = -0.0       ##
+            lin_vel_z =  -0. #-2.0
+            orientation = -0.0
+            stand_still = -1.0
+            stumble = -1.0
+            termination = -2.0
+            torques = -0.  #-1e-4
 
-        only_positive_rewards = False # if true negative total rewards are clipped at zero (avoids early termination problems)
+
+
+
+
+        only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.
@@ -269,19 +283,9 @@ class G1RoughCfg( BaseConfig ):
     class termination:
         r_threshold = 3.0
         p_threshold = 3.0
-        z_threshold = 0.3
+        z_threshold = 0.01
         forces_threshold = 200.0
 
-    class normalization:
-        class obs_scales:
-            ang_vel = 0.07      # 原0.25 → 匹配±15 rad/s到±1.05
-            orn = 1.25          # 原1.0 → 覆盖±0.8 rad安全范围
-            dof_pos = 2.0       # 原1.0 → 适配±0.5 rad机械限位
-            dof_vel = 0.033     # 原0.05 → 约束±30 rad/s到±1.0
-            height_measurements = 20.0  # 原5.0 → 放大微小地形差异
-        commands_scale = [0.5, 0.5, 1.0, 2.0]  # 差异化缩放[vx, vy, ωz, θ_pitch]
-        clip_observations = 10.  # 解注并设置观测截断
-        clip_actions = 10.       # 防止动作指令超限
 
     class noise:
         add_noise = True
@@ -321,46 +325,6 @@ class G1RoughCfg( BaseConfig ):
             contact_collection = 2 # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
 
 
-class G1RoughCfgPPO(BaseConfig):
-    seed = 1
-    runner_class_name = 'OnPolicyRunner'
-    class policy:
-        init_noise_std = 1.0
-        # actor_hidden_dims = [512, 256, 128]
-        # critic_hidden_dims = [512, 256, 128]
-        # activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
-        # only for 'ActorCriticRecurrent':
-        # rnn_type = 'lstm'
-        # rnn_hidden_size = 512
-        # rnn_num_layers = 1
+
         
-    class algorithm:
-        # training params
-        value_loss_coef = 1.0
-        use_clipped_value_loss = True
-        clip_param = 0.2
-        entropy_coef = 1e-5
-        num_learning_epochs = 2
-        num_mini_batches = 4 # mini batch size = num_envs*nsteps / nminibatches
-        learning_rate = 1.e-4
-        schedule = 'fixed' # could be adaptive, fixed
-        gamma = 0.99
-        lam = 0.95
-        desired_kl = 0.01
-        max_grad_norm = 1.
 
-    class runner:
-        policy_class_name = 'ActorCriticTransformer'
-        algorithm_class_name = 'PPO'
-        num_steps_per_env = 32 # per iteration
-        max_iterations = 4500 # number of policy updates
-
-        # logging
-        save_interval = 500 # check for potential saves every this many iterations
-        experiment_name = 'rough_g1'
-        run_name = None
-        # load and resume
-        resume = False
-        load_run = -1 # -1 = last run
-        checkpoint = -1 # -1 = last saved model
-        resume_path = None # updated from load_run and chkpt
